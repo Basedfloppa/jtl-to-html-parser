@@ -3,6 +3,7 @@ mod html_parser;
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver};
 use hdrhistogram::Histogram;
+use num_cpus;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -24,8 +25,9 @@ struct Row {
     response_message: String,
     #[serde(deserialize_with = "de_bool")]
     success: bool,
+    #[serde(deserialize_with = "de_optional_u64")]
     bytes: Option<u64>, // received bytes
-    #[serde(alias = "SentBytes", alias = "sentBytes")]
+    #[serde(alias = "SentBytes", alias = "sentBytes", deserialize_with = "de_optional_u64")]
     sent_bytes: Option<u64>,
 }
 
@@ -212,10 +214,6 @@ impl Shard {
     }
 }
 
-enum Msg {
-    Batch(Vec<Row>),
-}
-
 fn de_bool<'de, D>(d: D) -> Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -224,46 +222,16 @@ where
     Ok(s.eq_ignore_ascii_case("true"))
 }
 
-fn reader_thread(
-    mut rdr: csv::Reader<Box<dyn Read + Send>>,
-    tx: crossbeam_channel::Sender<Msg>,
-    batch_size: usize,
-) -> Result<()> {
-    let mut batch = Vec::with_capacity(batch_size);
-    let mut seen: u64 = 0;
-    for rec in rdr.deserialize::<Row>() {
-        match rec {
-            Ok(row) => {
-                seen += 1;
-                if seen % 1_000_000 == 0 {
-                    eprintln!("Read {seen} rows...");
-                }
-                batch.push(row);
-                if batch.len() >= batch_size
-                    && tx.send(Msg::Batch(std::mem::take(&mut batch))).is_err()
-                {
-                    return Ok(()); // workers are gone; nothing to do
-                }
-            }
-            Err(e) => {
-                eprintln!("Skipping bad row: {e}");
-            }
-        }
+fn de_optional_u64<'de, D>(d: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: Cow<'de, str> = Cow::deserialize(d)?;
+    if s.is_empty() || s.eq_ignore_ascii_case("null") {
+        Ok(None)
+    } else {
+        s.parse().map(Some).map_err(serde::de::Error::custom)
     }
-    if !batch.is_empty() && tx.send(Msg::Batch(batch)).is_err() {
-        return Ok(());
-    }
-    Ok(())
-}
-
-fn worker_thread(rx: Receiver<Msg>) -> Shard {
-    let mut shard = Shard::new();
-    while let Ok(Msg::Batch(rows)) = rx.recv() {
-        for r in &rows {
-            shard.add(r);
-        }
-    }
-    shard
 }
 
 fn kbps(bytes: u128, secs: f64) -> f64 {
@@ -285,6 +253,143 @@ fn open_reader(path: Option<&str>, delim: u8) -> Result<csv::Reader<Box<dyn Read
         .from_reader(boxed))
 }
 
+enum Msg {
+    Batch(Vec<Row>),
+}
+
+/// Parse CSV data using thread-based parallelism
+fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
+    eprintln!("Starting parallel parsing with {} CPU cores...", num_cpus::get());
+    
+    let threads = num_cpus::get();
+    let (tx, rx) = bounded::<Msg>(threads * 2);
+    
+    let mut workers = Vec::with_capacity(threads);
+    for i in 0..threads {
+        let rx_c = rx.clone();
+        workers.push(thread::spawn(move || {
+            eprintln!("Worker thread {} started", i);
+            worker_thread(rx_c)
+        }));
+    }
+    
+    let batch_size = 50_000;
+    let tx_c = tx.clone();
+    let path_string = path.to_string();
+    let reader_handle = thread::spawn(move || {
+        eprintln!("Reader thread started, opening file...");
+        let rdr = open_reader(Some(&path_string), delim);
+        match rdr {
+            Ok(rdr) => {
+                eprintln!("File opened successfully, starting to read...");
+                reader_thread(rdr, tx_c, batch_size)
+            }
+            Err(e) => {
+                eprintln!("Failed to open file: {}", e);
+                Err(e)
+            }
+        }
+    });
+    
+    drop(tx);
+    
+    eprintln!("Waiting for reader thread to finish...");
+    reader_handle.join().expect("reader panicked")?;
+    
+    eprintln!("Reader finished, waiting for worker threads...");
+    let mut total = Shard::new();
+    for (i, w) in workers.into_iter().enumerate() {
+        eprintln!("Collecting results from worker {}...", i);
+        let shard = w.join().expect("worker panicked");
+        total.merge(shard);
+    }
+    
+    eprintln!("Parallel parsing completed successfully");
+    Ok(total)
+}
+
+fn reader_thread(
+    mut rdr: csv::Reader<Box<dyn Read + Send>>,
+    tx: crossbeam_channel::Sender<Msg>,
+    batch_size: usize,
+) -> Result<()> {
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut seen: u64 = 0;
+    let mut last_log = Instant::now();
+    
+    for rec in rdr.deserialize::<Row>() {
+        match rec {
+            Ok(row) => {
+                seen += 1;
+                if seen % 1_000_000 == 0 {
+                    let elapsed = last_log.elapsed();
+                    eprintln!("Read {seen} rows... ({:.1} rows/sec)", 1_000_000.0 / elapsed.as_secs_f64());
+                    last_log = Instant::now();
+                }
+                batch.push(row);
+                if batch.len() >= batch_size
+                    && tx.send(Msg::Batch(std::mem::take(&mut batch))).is_err()
+                {
+                    return Ok(()); // workers are gone; nothing to do
+                }
+            }
+            Err(e) => {
+                eprintln!("Skipping bad row: {e}");
+            }
+        }
+    }
+    if !batch.is_empty() && tx.send(Msg::Batch(batch)).is_err() {
+        return Ok(());
+    }
+    Ok(())
+}
+
+fn worker_thread(rx: Receiver<Msg>) -> Shard {
+    let mut shard = Shard::new();
+    let mut processed = 0;
+    
+    while let Ok(Msg::Batch(rows)) = rx.recv() {
+        processed += rows.len();
+        for r in &rows {
+            shard.add(r);
+        }
+        
+        if processed >= 1_000_000 {
+            processed = 0;
+        }
+    }
+    
+    shard
+}
+
+/// Parse CSV data sequentially (for stdin or small files)
+fn parse_csv_sequential(mut rdr: csv::Reader<Box<dyn Read + Send>>) -> Result<Shard> {
+    eprintln!("Starting sequential parsing...");
+    let mut shard = Shard::new();
+    let mut seen: u64 = 0;
+    let mut last_log = Instant::now();
+    
+    for rec in rdr.deserialize::<Row>() {
+        match rec {
+            Ok(row) => {
+                seen += 1;
+                if seen % 1_000_000 == 0 {
+                    let elapsed = last_log.elapsed();
+                    eprintln!("Read {seen} rows... ({:.1} rows/sec)", 1_000_000.0 / elapsed.as_secs_f64());
+                    last_log = Instant::now();
+                }
+                shard.add(&row);
+            }
+            Err(e) => {
+                eprintln!("Skipping bad row: {e}");
+            }
+        }
+    }
+    
+    eprintln!("Sequential parsing completed, processed {} rows", seen);
+    Ok(shard)
+}
+
 fn main() -> Result<()> {
     let t0 = Instant::now();
 
@@ -294,29 +399,29 @@ fn main() -> Result<()> {
         .get(2)
         .and_then(|s| s.as_bytes().first().copied())
         .unwrap_or(b',');
-    let threads = num_cpus::get();
-
-    let (tx, rx) = bounded::<Msg>(threads * 2);
     
-    let mut workers = Vec::with_capacity(threads);
-    for _ in 0..threads {
-        let rx_c = rx.clone();
-        workers.push(thread::spawn(move || worker_thread(rx_c)));
-    }
-    
-    let batch_size = 20_000;
-    let tx_c = tx.clone();
-    let rdr = open_reader(input_path, delim)?;
-    let reader_handle = thread::spawn(move || reader_thread(rdr, tx_c, batch_size));
-    
-    drop(tx);
-    reader_handle.join().expect("reader panicked")?;
-    
-    let mut total = Shard::new();
-    for w in workers {
-        let shard = w.join().expect("worker panicked");
-        total.merge(shard);
-    }
+    let total = if let Some(path) = input_path {
+        if path == "-" {
+            // Use sequential parsing for stdin
+            let rdr = open_reader(input_path, delim)?;
+            parse_csv_sequential(rdr)?
+        } else {
+            // Try parallel parsing for files
+            match parse_csv_parallel(path, delim) {
+                Ok(shard) => shard,
+                Err(e) => {
+                    eprintln!("Parallel parsing failed: {}", e);
+                    eprintln!("Falling back to sequential parsing...");
+                    let rdr = open_reader(input_path, delim)?;
+                    parse_csv_sequential(rdr)?
+                }
+            }
+        }
+    } else {
+        // stdin
+        let rdr = open_reader(input_path, delim)?;
+        parse_csv_sequential(rdr)?
+    };
     
     let overall = &total.overall;
     
