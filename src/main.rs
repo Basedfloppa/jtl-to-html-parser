@@ -254,51 +254,38 @@ fn open_reader(path: Option<&str>, delim: u8) -> Result<csv::Reader<Box<dyn Read
         .from_reader(boxed))
 }
 
-/// Optimized CSV parser using memory-mapped files and manual parsing
-fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
-    eprintln!("Starting ptimized jtl parsing...");
+/// Adaptive CSV parser: uses memory-mapped for files < 20GB, streaming for larger files
+fn parse_csv_adaptive(path: &str, delim: u8) -> Result<Shard> {
+    // Check file size to decide which parser to use
+    let file = File::open(path).with_context(|| format!("open {}", path))?;
+    let file_size = file.metadata()?.len();
+    
+    if file_size < 20_000_000_000 { // < 20GB
+        eprintln!("File size: {:.1} GB - using memory-mapped parallel parser", 
+            file_size as f64 / 1_000_000_000.0);
+        parse_csv_memory_mapped(path, delim)
+    } else {
+        eprintln!("File size: {:.1} GB - using memory-efficient streaming parser", 
+            file_size as f64 / 1_000_000_000.0);
+        parse_csv_streaming(path, delim)
+    }
+}
+
+/// Memory-mapped CSV parser for files < 20GB (fastest)
+fn parse_csv_memory_mapped(path: &str, delim: u8) -> Result<Shard> {
+    eprintln!("Starting memory-mapped parallel parsing...");
 
     let file = File::open(path).with_context(|| format!("open {}", path))?;
     let mmap = unsafe { Mmap::map(&file)? };
     let data = mmap.as_ref();
     
     let threads = num_cpus::get();
-    eprintln!("Using {} threads for processing", threads);
+    eprintln!("Using {} threads for parallel processing", threads);
 
-    // Find header and parse column indices
+    // Find header
     let header_end = data.find_byte(b'\n').unwrap_or(0) + 1;
-    let header_line = &data[..header_end - 1]; // Exclude newline
+    let header = &data[..header_end];
     let body = &data[header_end..];
-    
-    // Parse header to get column indices
-    let header_cols: Vec<&[u8]> = header_line.split(|&b| b == delim).collect();
-    let mut time_stamp_idx = None;
-    let mut elapsed_idx = None;
-    let mut label_idx = None;
-    let mut response_code_idx = None;
-    let mut response_message_idx = None;
-    let mut success_idx = None;
-    let mut bytes_idx = None;
-    let mut sent_bytes_idx = None;
-    
-    for (i, col) in header_cols.iter().enumerate() {
-        match *col {
-            b"timeStamp" => time_stamp_idx = Some(i),
-            b"elapsed" => elapsed_idx = Some(i),
-            b"label" => label_idx = Some(i),
-            b"responseCode" => response_code_idx = Some(i),
-            b"responseMessage" => response_message_idx = Some(i),
-            b"success" => success_idx = Some(i),
-            b"bytes" => bytes_idx = Some(i),
-            b"sentBytes" | b"SentBytes" => sent_bytes_idx = Some(i),
-            _ => {}
-        }
-    }
-    
-    // Check we found all required columns
-    if time_stamp_idx.is_none() || elapsed_idx.is_none() || label_idx.is_none() {
-        return Err(anyhow::anyhow!("Missing required columns in JTL file"));
-    }
     
     // Split into chunks for parallel processing
     let chunk_size = (body.len() + threads - 1) / threads;
@@ -313,7 +300,7 @@ fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
             continue;
         }
         
-        // Adjust start to beginning of a line (unless it's the first chunk)
+        // Adjust start to beginning of a line
         let mut chunk_start = start;
         if i > 0 {
             while chunk_start > 0 && body[chunk_start - 1] != b'\n' {
@@ -321,14 +308,14 @@ fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
             }
         }
         
-        // Adjust end to end of a line (unless it's the last chunk)
+        // Adjust end to end of a line
         let mut chunk_end = end;
         if i < threads - 1 && chunk_end < body.len() {
             while chunk_end < body.len() && body[chunk_end] != b'\n' {
                 chunk_end += 1;
             }
             if chunk_end < body.len() {
-                chunk_end += 1; // Include the newline
+                chunk_end += 1;
             }
         }
         
@@ -342,114 +329,36 @@ fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
     
     eprintln!("Processing {} chunks in parallel...", chunk_starts.len());
     
-    // Process chunks in parallel using thread pool
+    // Process chunks in parallel
     let mut handles = Vec::with_capacity(chunk_starts.len());
-    
-    // Prepare column indices for threads
-    let time_stamp_idx = time_stamp_idx.unwrap();
-    let elapsed_idx = elapsed_idx.unwrap();
-    let label_idx = label_idx.unwrap();
-    let response_code_idx = response_code_idx.unwrap_or(usize::MAX);
-    let response_message_idx = response_message_idx.unwrap_or(usize::MAX);
-    let success_idx = success_idx.unwrap_or(usize::MAX);
-    let bytes_idx = bytes_idx.unwrap_or(usize::MAX);
-    let sent_bytes_idx = sent_bytes_idx.unwrap_or(usize::MAX);
     
     for i in 0..chunk_starts.len() {
         let start = chunk_starts[i];
         let end = chunk_ends[i];
-        let chunk = body[start..end].to_vec(); // Copy chunk for thread
+        let chunk = &body[start..end];
+        
+        // Create chunk with header for CSV parsing
+        let mut chunk_with_header = Vec::with_capacity(header.len() + chunk.len());
+        chunk_with_header.extend_from_slice(header);
+        chunk_with_header.extend_from_slice(chunk);
         
         let handle = thread::spawn(move || {
             let mut shard = Shard::new();
-            let lines = chunk.split(|&b| b == b'\n');
+            let mut rdr = csv::ReaderBuilder::new()
+                .delimiter(delim)
+                .has_headers(true)
+                .flexible(true)
+                .from_reader(chunk_with_header.as_slice());
             
-            for line in lines {
-                if line.is_empty() {
-                    continue;
+            for rec in rdr.deserialize::<Row>() {
+                match rec {
+                    Ok(row) => {
+                        shard.add(&row);
+                    }
+                    Err(_) => {
+                        // Skip bad rows
+                    }
                 }
-                
-                let cols: Vec<&[u8]> = line.split(|&b| b == delim).collect();
-                if cols.len() <= label_idx.max(elapsed_idx).max(time_stamp_idx) {
-                    continue; // Skip malformed lines
-                }
-                
-                // Parse required fields
-                let time_stamp = std::str::from_utf8(cols[time_stamp_idx])
-                    .ok()
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(0);
-                
-                let elapsed = std::str::from_utf8(cols[elapsed_idx])
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                
-                let label = std::str::from_utf8(cols[label_idx])
-                    .unwrap_or("")
-                    .to_string();
-                
-                // Parse optional fields
-                let response_code = if response_code_idx < cols.len() {
-                    std::str::from_utf8(cols[response_code_idx]).unwrap_or("").to_string()
-                } else {
-                    String::new()
-                };
-                
-                let response_message = if response_message_idx < cols.len() {
-                    std::str::from_utf8(cols[response_message_idx]).unwrap_or("").to_string()
-                } else {
-                    String::new()
-                };
-                
-                let success = if success_idx < cols.len() {
-                    std::str::from_utf8(cols[success_idx])
-                        .map(|s| s.eq_ignore_ascii_case("true"))
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-                
-                let bytes = if bytes_idx < cols.len() {
-                    std::str::from_utf8(cols[bytes_idx])
-                        .ok()
-                        .and_then(|s| {
-                            if s.is_empty() || s.eq_ignore_ascii_case("null") {
-                                None
-                            } else {
-                                s.parse::<u64>().ok()
-                            }
-                        })
-                } else {
-                    None
-                };
-                
-                let sent_bytes = if sent_bytes_idx < cols.len() {
-                    std::str::from_utf8(cols[sent_bytes_idx])
-                        .ok()
-                        .and_then(|s| {
-                            if s.is_empty() || s.eq_ignore_ascii_case("null") {
-                                None
-                            } else {
-                                s.parse::<u64>().ok()
-                            }
-                        })
-                } else {
-                    None
-                };
-                
-                let row = Row {
-                    time_stamp,
-                    elapsed,
-                    label,
-                    response_code,
-                    response_message,
-                    success,
-                    bytes,
-                    sent_bytes,
-                };
-                
-                shard.add(&row);
             }
             
             shard
@@ -468,8 +377,52 @@ fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
         total.merge(shard);
     }
     
-    eprintln!("Parallel parsing completed successfully");
+    eprintln!("Memory-mapped parsing completed successfully");
     Ok(total)
+}
+
+/// Streaming CSV parser for files > 20GB (memory-efficient)
+fn parse_csv_streaming(path: &str, delim: u8) -> Result<Shard> {
+    eprintln!("Starting memory-efficient streaming parser...");
+    
+    let mut shard = Shard::new();
+    let mut lines_processed = 0;
+    let mut last_progress = Instant::now();
+    
+    let file = File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    
+    // Read and parse sequentially
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(delim)
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(reader);
+    
+    for rec in rdr.deserialize::<Row>() {
+        match rec {
+            Ok(row) => {
+                lines_processed += 1;
+                
+                // Report progress every 1 million lines
+                if lines_processed % 1_000_000 == 0 {
+                    let elapsed = last_progress.elapsed();
+                    eprintln!("Processed {}M lines ({:.1} lines/sec)", 
+                        lines_processed / 1_000_000,
+                        1_000_000.0 / elapsed.as_secs_f64());
+                    last_progress = Instant::now();
+                }
+                
+                shard.add(&row);
+            }
+            Err(_) => {
+                // Skip bad rows
+            }
+        }
+    }
+    
+    eprintln!("Streaming parsing completed: processed {} lines", lines_processed);
+    Ok(shard)
 }
 
 /// Parse CSV data sequentially (for stdin or small files)
@@ -516,13 +469,13 @@ fn main() -> Result<()> {
             let rdr = open_reader(input_path, delim)?;
             parse_csv_sequential(rdr)?
         } else {
-            // Try optimized parsing first (memory-mapped, parallel)
-            match parse_csv_parallel(path, delim) {
+            // Use adaptive parser based on file size
+            match parse_csv_adaptive(path, delim) {
                 Ok(shard) => shard,
                 Err(e) => {
-                    eprintln!("Optimized parsing failed: {}", e);
+                    eprintln!("Adaptive parsing failed: {}", e);
                     eprintln!("Falling back to sequential parsing...");
-                     let rdr = open_reader(input_path, delim)?;
+                    let rdr = open_reader(input_path, delim)?;
                     parse_csv_sequential(rdr)?
                 }
             }
@@ -566,31 +519,19 @@ fn main() -> Result<()> {
         kbps_sent: kbps(overall.sent_bytes, dur),
     };
     
-    let mut labels_out: Vec<LabelOut> = total
-        .per_label
+    // Prepare label outputs
+    let mut label_outs: Vec<LabelOut> = total.per_label
         .into_iter()
         .map(|(label, agg)| {
             let dur = agg.duration_secs();
-            let tps = if dur > 0.0 {
-                agg.count as f64 / dur
-            } else {
-                0.0
-            };
+            let tps = if dur > 0.0 { agg.count as f64 / dur } else { 0.0 };
             LabelOut {
                 label,
                 count: agg.count,
                 fails: agg.fails,
-                error_pct: if agg.count == 0 {
-                    0.0
-                } else {
-                    (agg.fails as f64 / agg.count as f64) * 100.0
-                },
+                error_pct: if agg.count == 0 { 0.0 } else { (agg.fails as f64 / agg.count as f64) * 100.0 },
                 avg_ms: agg.avg_ms(),
-                min_ms: if agg.min_elapsed == u64::MAX {
-                    0
-                } else {
-                    agg.min_elapsed
-                },
+                min_ms: if agg.min_elapsed == u64::MAX { 0 } else { agg.min_elapsed },
                 max_ms: agg.max_elapsed,
                 p50_ms: agg.q(0.50),
                 p90_ms: agg.q(0.90),
@@ -602,37 +543,32 @@ fn main() -> Result<()> {
             }
         })
         .collect();
-    labels_out.sort_by(|a, b| b.count.cmp(&a.count));
+    label_outs.sort_by(|a, b| b.count.cmp(&a.count));
     
-    let total_errors: u64 = total.error_types.values().sum();
-    let errs_out: Vec<ErrTypeOut> = {
-        let mut v: Vec<_> = total.error_types.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
-        v.into_iter()
-            .map(|((code, msg), cnt)| ErrTypeOut {
-                response_code: code,
-                response_message: msg,
-                count: cnt,
-                error_pct: if total_errors == 0 {
-                    0.0
-                } else {
-                    (cnt as f64 / total_errors as f64) * 100.0
-                },
-                sample_pct: if overall.count == 0 {
-                    0.0
-                } else {
-                    (cnt as f64 / overall.count as f64) * 100.0
-                },
-            })
-            .collect()
-    };
-
-    let out_path = args.get(3).map(|s| s.as_str()).unwrap_or("jtl_report.html");
+    // Prepare error type outputs
+    let mut err_outs: Vec<ErrTypeOut> = total.error_types
+        .into_iter()
+        .map(|((response_code, response_message), count)| {
+            let error_pct = if overall.fails == 0 { 0.0 } else { (count as f64 / overall.fails as f64) * 100.0 };
+            let sample_pct = if overall.count == 0 { 0.0 } else { (count as f64 / overall.count as f64) * 100.0 };
+            ErrTypeOut {
+                response_code,
+                response_message,
+                count,
+                error_pct,
+                sample_pct,
+            }
+        })
+        .collect();
+    err_outs.sort_by(|a, b| b.count.cmp(&a.count));
+    
     let title = input_path.unwrap_or("stdin");
-    let html = html_parser::render_html(overall_out, labels_out, errs_out, title);
-    std::fs::write(out_path, html).with_context(|| format!("write {}", out_path))?;
-    eprintln!("Total time: {:.3}s", t0.elapsed().as_secs_f64());
-    eprintln!("Wrote HTML report to {}", out_path);
+    let html = html_parser::render_html(overall_out, label_outs, err_outs, title);
+    let output_path = args.get(3).map(|s| s.as_str()).unwrap_or("jtl_report.html");
+    std::fs::write(output_path, html)?;
+    
+    let total_time = t0.elapsed();
+    eprintln!("Total processing time: {:.2}s", total_time.as_secs_f64());
 
     Ok(())
 }
