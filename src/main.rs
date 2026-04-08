@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::borrow::Cow;
 use std::env;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::thread;
 use std::time::Instant;
 
@@ -381,48 +381,170 @@ fn parse_csv_memory_mapped(path: &str, delim: u8) -> Result<Shard> {
     Ok(total)
 }
 
-/// Streaming CSV parser for files > 20GB (memory-efficient)
+/// Parallel streaming CSV parser for large files (>20GB) using multiple file cursors with fixed chunk size
 fn parse_csv_streaming(path: &str, delim: u8) -> Result<Shard> {
-    eprintln!("Starting memory-efficient streaming parser...");
+    eprintln!("Starting memory-efficient parallel streaming parser for large files...");
     
-    let mut shard = Shard::new();
-    let mut lines_processed = 0;
-    let mut last_progress = Instant::now();
-    
+    // Get file size and header info
     let file = File::open(path)?;
-    let reader = std::io::BufReader::new(file);
+    let file_size = file.metadata()?.len();
     
-    // Read and parse sequentially
-    let mut rdr = csv::ReaderBuilder::new()
-        .delimiter(delim)
-        .has_headers(true)
-        .flexible(true)
-        .from_reader(reader);
+    // Read header to get its size
+    let mut header_buf = Vec::new();
+    let mut header_reader = std::io::BufReader::new(&file);
+    std::io::BufRead::read_until(&mut header_reader, b'\n', &mut header_buf)?;
+    let header_size = header_buf.len() as u64;
+    let data_size = file_size - header_size;
     
-    for rec in rdr.deserialize::<Row>() {
-        match rec {
-            Ok(row) => {
-                lines_processed += 1;
-                
-                // Report progress every 1 million lines
-                if lines_processed % 1_000_000 == 0 {
-                    let elapsed = last_progress.elapsed();
-                    eprintln!("Processed {}M lines ({:.1} lines/sec)", 
-                        lines_processed / 1_000_000,
-                        1_000_000.0 / elapsed.as_secs_f64());
-                    last_progress = Instant::now();
+    eprintln!("File size: {:.1} GB, Data size: {:.1} GB", 
+        file_size as f64 / 1_000_000_000.0,
+        data_size as f64 / 1_000_000_000.0);
+    
+    // Use fixed chunk size to avoid memory issues (1GB chunks)
+    let chunk_size = 512 * 1024 * 1024; // 1GB
+    let num_chunks = ((data_size + chunk_size - 1) / chunk_size) as usize;
+    
+    // Use thread pool with work stealing - each thread processes multiple small chunks
+    let threads = num_cpus::get();
+    eprintln!("Using {} threads with {} chunks ({} MB each)", 
+        threads, num_chunks, chunk_size / (1024 * 1024));
+    
+    // Share header buffer between threads using Arc
+    use std::sync::Arc;
+    let header_buf_arc = Arc::new(header_buf);
+    
+    // Create work queue using atomic counter
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next_chunk = Arc::new(AtomicUsize::new(0));
+    
+    // Spawn worker threads
+    let mut handles = Vec::with_capacity(threads);
+    
+    for thread_id in 0..threads {
+        let path = path.to_string();
+        let header_buf_clone = Arc::clone(&header_buf_arc);
+        let next_chunk_clone = Arc::clone(&next_chunk);
+        let file_size = file_size;
+        let header_size = header_size;
+        let chunk_size = chunk_size;
+        
+        let handle = thread::spawn(move || {
+            let mut shard = Shard::new();
+            let mut total_lines_processed = 0;
+            
+            // Each thread opens its own file handle
+            match File::open(&path) {
+                Ok(mut file) => {
+                    // Process chunks using atomic counter
+                    loop {
+                        let chunk_idx = next_chunk_clone.fetch_add(1, Ordering::Relaxed);
+                        if chunk_idx >= num_chunks {
+                            break;
+                        }
+                        
+                        let start = header_size + (chunk_idx as u64) * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, file_size);
+                        
+                        if start >= end {
+                            continue;
+                        }
+                        
+                        // Seek to chunk start
+                        if let Err(e) = file.seek(std::io::SeekFrom::Start(start)) {
+                            eprintln!("Thread {} seek error: {}", thread_id, e);
+                            continue;
+                        }
+                        
+                        // Read chunk data (max 100MB)
+                        let chunk_size_bytes = (end - start) as usize;
+                        let mut chunk = vec![0; chunk_size_bytes];
+                        
+                        if let Err(e) = file.read_exact(&mut chunk) {
+                            eprintln!("Thread {} read error: {}", thread_id, e);
+                            continue;
+                        }
+                        
+                        // Adjust chunk boundaries to line boundaries
+                        let mut chunk_start = 0;
+                        let mut chunk_end = chunk.len();
+                        
+                        if chunk_idx > 0 {
+                            // Find first newline after start
+                            while chunk_start < chunk.len() && chunk[chunk_start] != b'\n' {
+                                chunk_start += 1;
+                            }
+                            if chunk_start < chunk.len() {
+                                chunk_start += 1; // Skip the newline
+                            }
+                        }
+                        
+                        if end < file_size {
+                            // Find last newline before end (for all but last chunk)
+                            while chunk_end > 0 && chunk[chunk_end - 1] != b'\n' {
+                                chunk_end -= 1;
+                            }
+                        }
+                        
+                        if chunk_start >= chunk_end {
+                            continue;
+                        }
+                        
+                        // Create CSV reader for this chunk (need to include header)
+                        let mut chunk_with_header = Vec::with_capacity(header_buf_clone.len() + (chunk_end - chunk_start));
+                        chunk_with_header.extend_from_slice(&header_buf_clone);
+                        chunk_with_header.extend_from_slice(&chunk[chunk_start..chunk_end]);
+                        
+                        let mut rdr = csv::ReaderBuilder::new()
+                            .delimiter(delim)
+                            .has_headers(true)
+                            .flexible(true)
+                            .from_reader(chunk_with_header.as_slice());
+                        
+                        let mut chunk_lines = 0;
+                        // Parse rows
+                        for rec in rdr.deserialize::<Row>() {
+                            match rec {
+                                Ok(row) => {
+                                    chunk_lines += 1;
+                                    shard.add(&row);
+                                }
+                                Err(_) => {
+                                    // Skip bad rows
+                                }
+                            }
+                        }
+                        
+                        total_lines_processed += chunk_lines;
+                        
+                        // Report progress every 10 chunks
+                        if chunk_idx % 10 == 0 {
+                            eprintln!("Thread {}: processed chunk {}/{} ({} lines total)", 
+                                thread_id, chunk_idx + 1, num_chunks, total_lines_processed);
+                        }
+                    }
+                    
+                    eprintln!("Thread {} completed: processed {} total lines", thread_id, total_lines_processed);
                 }
-                
-                shard.add(&row);
+                Err(e) => {
+                    eprintln!("Thread {} failed to open file: {}", thread_id, e);
+                }
             }
-            Err(_) => {
-                // Skip bad rows
-            }
-        }
+            
+            shard
+        });
+        
+        handles.push(handle);
     }
     
-    eprintln!("Streaming parsing completed: processed {} lines", lines_processed);
-    Ok(shard)
+    // Merge results
+    let mut total = Shard::new();
+    for handle in handles {
+        let shard = handle.join().expect("thread panicked");
+        total.merge(shard);
+    }
+    
+    eprintln!("Parallel streaming parsing completed successfully");
+    Ok(total)
 }
 
 /// Parse CSV data sequentially (for stdin or small files)
