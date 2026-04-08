@@ -1,5 +1,6 @@
 mod html_parser;
 
+use ahash::AHashMap;
 use anyhow::{Context, Result};
 use bstr::ByteSlice;
 use hdrhistogram::Histogram;
@@ -7,7 +8,6 @@ use memmap2::Mmap;
 use num_cpus;
 use serde::Deserialize;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
@@ -172,16 +172,16 @@ impl Default for Agg {
 #[derive(Default)]
 struct Shard {
     overall: Agg,
-    per_label: HashMap<String, Agg>,
-    error_types: HashMap<(String, String), u64>,
+    per_label: AHashMap<String, Agg>,
+    error_types: AHashMap<(String, String), u64>,
 }
 
 impl Shard {
     fn new() -> Self {
         Self {
             overall: Agg::new(),
-            per_label: HashMap::new(),
-            error_types: HashMap::new(),
+            per_label: AHashMap::default(),
+            error_types: AHashMap::default(),
         }
     }
 
@@ -256,7 +256,7 @@ fn open_reader(path: Option<&str>, delim: u8) -> Result<csv::Reader<Box<dyn Read
 
 /// Optimized CSV parser using memory-mapped files and manual parsing
 fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
-    eprintln!("Starting optimized parsing with memory-mapped file...");
+    eprintln!("Starting ptimized jtl parsing...");
 
     let file = File::open(path).with_context(|| format!("open {}", path))?;
     let mmap = unsafe { Mmap::map(&file)? };
@@ -265,10 +265,40 @@ fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
     let threads = num_cpus::get();
     eprintln!("Using {} threads for processing", threads);
 
-    // Find header
+    // Find header and parse column indices
     let header_end = data.find_byte(b'\n').unwrap_or(0) + 1;
-    let header = &data[..header_end];
+    let header_line = &data[..header_end - 1]; // Exclude newline
     let body = &data[header_end..];
+    
+    // Parse header to get column indices
+    let header_cols: Vec<&[u8]> = header_line.split(|&b| b == delim).collect();
+    let mut time_stamp_idx = None;
+    let mut elapsed_idx = None;
+    let mut label_idx = None;
+    let mut response_code_idx = None;
+    let mut response_message_idx = None;
+    let mut success_idx = None;
+    let mut bytes_idx = None;
+    let mut sent_bytes_idx = None;
+    
+    for (i, col) in header_cols.iter().enumerate() {
+        match *col {
+            b"timeStamp" => time_stamp_idx = Some(i),
+            b"elapsed" => elapsed_idx = Some(i),
+            b"label" => label_idx = Some(i),
+            b"responseCode" => response_code_idx = Some(i),
+            b"responseMessage" => response_message_idx = Some(i),
+            b"success" => success_idx = Some(i),
+            b"bytes" => bytes_idx = Some(i),
+            b"sentBytes" | b"SentBytes" => sent_bytes_idx = Some(i),
+            _ => {}
+        }
+    }
+    
+    // Check we found all required columns
+    if time_stamp_idx.is_none() || elapsed_idx.is_none() || label_idx.is_none() {
+        return Err(anyhow::anyhow!("Missing required columns in JTL file"));
+    }
     
     // Split into chunks for parallel processing
     let chunk_size = (body.len() + threads - 1) / threads;
@@ -315,36 +345,111 @@ fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
     // Process chunks in parallel using thread pool
     let mut handles = Vec::with_capacity(chunk_starts.len());
     
+    // Prepare column indices for threads
+    let time_stamp_idx = time_stamp_idx.unwrap();
+    let elapsed_idx = elapsed_idx.unwrap();
+    let label_idx = label_idx.unwrap();
+    let response_code_idx = response_code_idx.unwrap_or(usize::MAX);
+    let response_message_idx = response_message_idx.unwrap_or(usize::MAX);
+    let success_idx = success_idx.unwrap_or(usize::MAX);
+    let bytes_idx = bytes_idx.unwrap_or(usize::MAX);
+    let sent_bytes_idx = sent_bytes_idx.unwrap_or(usize::MAX);
+    
     for i in 0..chunk_starts.len() {
         let start = chunk_starts[i];
         let end = chunk_ends[i];
-        let chunk = &body[start..end];
-        
-        // Create a new chunk that includes the header
-        let mut chunk_with_header = Vec::with_capacity(header.len() + chunk.len());
-        chunk_with_header.extend_from_slice(header);
-        chunk_with_header.extend_from_slice(chunk);
+        let chunk = body[start..end].to_vec(); // Copy chunk for thread
         
         let handle = thread::spawn(move || {
             let mut shard = Shard::new();
-            let mut rdr = csv::ReaderBuilder::new()
-                .delimiter(delim)
-                .has_headers(true)
-                .flexible(true)
-                .from_reader(chunk_with_header.as_slice());
+            let lines = chunk.split(|&b| b == b'\n');
             
-            for rec in rdr.deserialize::<Row>() {
-                match rec {
-                    Ok(row) => {
-                        shard.add(&row);
-                    }
-                    Err(e) => {
-                        // Log first few errors for debugging
-                        if i == 0 {
-                            eprintln!("Skipping bad row in chunk {}: {}", i, e);
-                        }
-                    }
+            for line in lines {
+                if line.is_empty() {
+                    continue;
                 }
+                
+                let cols: Vec<&[u8]> = line.split(|&b| b == delim).collect();
+                if cols.len() <= label_idx.max(elapsed_idx).max(time_stamp_idx) {
+                    continue; // Skip malformed lines
+                }
+                
+                // Parse required fields
+                let time_stamp = std::str::from_utf8(cols[time_stamp_idx])
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+                
+                let elapsed = std::str::from_utf8(cols[elapsed_idx])
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                
+                let label = std::str::from_utf8(cols[label_idx])
+                    .unwrap_or("")
+                    .to_string();
+                
+                // Parse optional fields
+                let response_code = if response_code_idx < cols.len() {
+                    std::str::from_utf8(cols[response_code_idx]).unwrap_or("").to_string()
+                } else {
+                    String::new()
+                };
+                
+                let response_message = if response_message_idx < cols.len() {
+                    std::str::from_utf8(cols[response_message_idx]).unwrap_or("").to_string()
+                } else {
+                    String::new()
+                };
+                
+                let success = if success_idx < cols.len() {
+                    std::str::from_utf8(cols[success_idx])
+                        .map(|s| s.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                
+                let bytes = if bytes_idx < cols.len() {
+                    std::str::from_utf8(cols[bytes_idx])
+                        .ok()
+                        .and_then(|s| {
+                            if s.is_empty() || s.eq_ignore_ascii_case("null") {
+                                None
+                            } else {
+                                s.parse::<u64>().ok()
+                            }
+                        })
+                } else {
+                    None
+                };
+                
+                let sent_bytes = if sent_bytes_idx < cols.len() {
+                    std::str::from_utf8(cols[sent_bytes_idx])
+                        .ok()
+                        .and_then(|s| {
+                            if s.is_empty() || s.eq_ignore_ascii_case("null") {
+                                None
+                            } else {
+                                s.parse::<u64>().ok()
+                            }
+                        })
+                } else {
+                    None
+                };
+                
+                let row = Row {
+                    time_stamp,
+                    elapsed,
+                    label,
+                    response_code,
+                    response_message,
+                    success,
+                    bytes,
+                    sent_bytes,
+                };
+                
+                shard.add(&row);
             }
             
             shard
@@ -363,7 +468,7 @@ fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
         total.merge(shard);
     }
     
-    eprintln!("Optimized parsing completed successfully");
+    eprintln!("Parallel parsing completed successfully");
     Ok(total)
 }
 
