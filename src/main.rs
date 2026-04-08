@@ -14,6 +14,21 @@ use std::io::{self, Read, Seek};
 use std::thread;
 use std::time::Instant;
 
+// Macro for conditional verbose output
+#[cfg(feature = "verbose")]
+macro_rules! verbose_eprintln {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*)
+    };
+}
+
+#[cfg(not(feature = "verbose"))]
+macro_rules! verbose_eprintln {
+    ($($arg:tt)*) => {
+        // No output in non-verbose mode
+    };
+}
+
 #[derive(Debug, Deserialize, Clone)]
 struct Row {
     #[serde(rename = "timeStamp")]
@@ -189,11 +204,11 @@ impl Shard {
         if !r.success {
             *self
                 .error_types
-                .entry((r.response_code.to_string(), r.response_message.to_string()))
+                .entry((r.response_code.clone(), r.response_message.clone()))
                 .or_default() += 1;
         }
         self.overall.add(r);
-        self.per_label.entry(r.label.to_string()).or_default().add(r);
+        self.per_label.entry(r.label.clone()).or_default().add(r);
     }
 
     fn merge(&mut self, other: Shard) {
@@ -261,11 +276,11 @@ fn parse_csv_adaptive(path: &str, delim: u8) -> Result<Shard> {
     let file_size = file.metadata()?.len();
     
     if file_size < 20_000_000_000 { // < 20GB
-        eprintln!("File size: {:.1} GB - using memory-mapped parallel parser", 
+        verbose_eprintln!("File size: {:.1} GB - using memory-mapped parallel parser", 
             file_size as f64 / 1_000_000_000.0);
         parse_csv_memory_mapped(path, delim)
     } else {
-        eprintln!("File size: {:.1} GB - using memory-efficient streaming parser", 
+        verbose_eprintln!("File size: {:.1} GB - using memory-efficient streaming parser", 
             file_size as f64 / 1_000_000_000.0);
         parse_csv_streaming(path, delim)
     }
@@ -273,13 +288,13 @@ fn parse_csv_adaptive(path: &str, delim: u8) -> Result<Shard> {
 
 /// Memory-mapped CSV parser for files < 20GB (fastest)
 fn parse_csv_memory_mapped(path: &str, delim: u8) -> Result<Shard> {
-    eprintln!("Starting memory-mapped parallel parsing...");
+    verbose_eprintln!("Starting memory-mapped parallel parsing...");
 
     let file = File::open(path).with_context(|| format!("open {}", path))?;
     let mmap = unsafe { Mmap::map(&file)? };
     
     let threads = num_cpus::get();
-    eprintln!("Using {} threads for parallel processing", threads);
+    verbose_eprintln!("Using {} threads for parallel processing", threads);
 
     // Find header
     let data = mmap.as_ref();
