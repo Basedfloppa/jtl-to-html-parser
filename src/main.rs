@@ -1,8 +1,9 @@
 mod html_parser;
 
 use anyhow::{Context, Result};
-use crossbeam_channel::{bounded, Receiver};
+use bstr::ByteSlice;
 use hdrhistogram::Histogram;
+use memmap2::Mmap;
 use num_cpus;
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -253,113 +254,117 @@ fn open_reader(path: Option<&str>, delim: u8) -> Result<csv::Reader<Box<dyn Read
         .from_reader(boxed))
 }
 
-enum Msg {
-    Batch(Vec<Row>),
-}
-
-/// Parse CSV data using thread-based parallelism
+/// Optimized CSV parser using memory-mapped files and manual parsing
 fn parse_csv_parallel(path: &str, delim: u8) -> Result<Shard> {
-    eprintln!("Starting parallel parsing with {} CPU cores...", num_cpus::get());
+    eprintln!("Starting optimized parsing with memory-mapped file...");
+
+    let file = File::open(path).with_context(|| format!("open {}", path))?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let data = mmap.as_ref();
     
     let threads = num_cpus::get();
-    let (tx, rx) = bounded::<Msg>(threads * 2);
+    eprintln!("Using {} threads for processing", threads);
+
+    // Find header
+    let header_end = data.find_byte(b'\n').unwrap_or(0) + 1;
+    let header = &data[..header_end];
+    let body = &data[header_end..];
     
-    let mut workers = Vec::with_capacity(threads);
+    // Split into chunks for parallel processing
+    let chunk_size = (body.len() + threads - 1) / threads;
+    let mut chunk_starts = Vec::with_capacity(threads);
+    let mut chunk_ends = Vec::with_capacity(threads);
+    
     for i in 0..threads {
-        let rx_c = rx.clone();
-        workers.push(thread::spawn(move || {
-            eprintln!("Worker thread {} started", i);
-            worker_thread(rx_c)
-        }));
-    }
-    
-    let batch_size = 50_000;
-    let tx_c = tx.clone();
-    let path_string = path.to_string();
-    let reader_handle = thread::spawn(move || {
-        eprintln!("Reader thread started, opening file...");
-        let rdr = open_reader(Some(&path_string), delim);
-        match rdr {
-            Ok(rdr) => {
-                eprintln!("File opened successfully, starting to read...");
-                reader_thread(rdr, tx_c, batch_size)
-            }
-            Err(e) => {
-                eprintln!("Failed to open file: {}", e);
-                Err(e)
+        let start = i * chunk_size;
+        let end = (start + chunk_size).min(body.len());
+        
+        if start >= end {
+            continue;
+        }
+        
+        // Adjust start to beginning of a line (unless it's the first chunk)
+        let mut chunk_start = start;
+        if i > 0 {
+            while chunk_start > 0 && body[chunk_start - 1] != b'\n' {
+                chunk_start -= 1;
             }
         }
-    });
+        
+        // Adjust end to end of a line (unless it's the last chunk)
+        let mut chunk_end = end;
+        if i < threads - 1 && chunk_end < body.len() {
+            while chunk_end < body.len() && body[chunk_end] != b'\n' {
+                chunk_end += 1;
+            }
+            if chunk_end < body.len() {
+                chunk_end += 1; // Include the newline
+            }
+        }
+        
+        if chunk_start >= chunk_end {
+            continue;
+        }
+        
+        chunk_starts.push(chunk_start);
+        chunk_ends.push(chunk_end);
+    }
     
-    drop(tx);
+    eprintln!("Processing {} chunks in parallel...", chunk_starts.len());
     
-    eprintln!("Waiting for reader thread to finish...");
-    reader_handle.join().expect("reader panicked")?;
+    // Process chunks in parallel using thread pool
+    let mut handles = Vec::with_capacity(chunk_starts.len());
     
-    eprintln!("Reader finished, waiting for worker threads...");
+    for i in 0..chunk_starts.len() {
+        let start = chunk_starts[i];
+        let end = chunk_ends[i];
+        let chunk = &body[start..end];
+        
+        // Create a new chunk that includes the header
+        let mut chunk_with_header = Vec::with_capacity(header.len() + chunk.len());
+        chunk_with_header.extend_from_slice(header);
+        chunk_with_header.extend_from_slice(chunk);
+        
+        let handle = thread::spawn(move || {
+            let mut shard = Shard::new();
+            let mut rdr = csv::ReaderBuilder::new()
+                .delimiter(delim)
+                .has_headers(true)
+                .flexible(true)
+                .from_reader(chunk_with_header.as_slice());
+            
+            for rec in rdr.deserialize::<Row>() {
+                match rec {
+                    Ok(row) => {
+                        shard.add(&row);
+                    }
+                    Err(e) => {
+                        // Log first few errors for debugging
+                        if i == 0 {
+                            eprintln!("Skipping bad row in chunk {}: {}", i, e);
+                        }
+                    }
+                }
+            }
+            
+            shard
+        });
+
+        eprintln!("Processed {} rows, chunk {}/{}", chunk_size * (i + 1), i + 1, chunk_starts.len());
+        
+        handles.push(handle);
+    }
+    
+    // Merge all shards
+    eprintln!("Merging results from {} shards...", handles.len());
     let mut total = Shard::new();
-    for (i, w) in workers.into_iter().enumerate() {
-        eprintln!("Collecting results from worker {}...", i);
-        let shard = w.join().expect("worker panicked");
+    for handle in handles {
+        let shard = handle.join().expect("thread panicked");
         total.merge(shard);
     }
     
-    eprintln!("Parallel parsing completed successfully");
+    eprintln!("Optimized parsing completed successfully");
     Ok(total)
-}
-
-fn reader_thread(
-    mut rdr: csv::Reader<Box<dyn Read + Send>>,
-    tx: crossbeam_channel::Sender<Msg>,
-    batch_size: usize,
-) -> Result<()> {
-    let mut batch = Vec::with_capacity(batch_size);
-    let mut seen: u64 = 0;
-    let mut last_log = Instant::now();
-    
-    for rec in rdr.deserialize::<Row>() {
-        match rec {
-            Ok(row) => {
-                seen += 1;
-                if seen % 1_000_000 == 0 {
-                    let elapsed = last_log.elapsed();
-                    eprintln!("Read {seen} rows... ({:.1} rows/sec)", 1_000_000.0 / elapsed.as_secs_f64());
-                    last_log = Instant::now();
-                }
-                batch.push(row);
-                if batch.len() >= batch_size
-                    && tx.send(Msg::Batch(std::mem::take(&mut batch))).is_err()
-                {
-                    return Ok(()); // workers are gone; nothing to do
-                }
-            }
-            Err(e) => {
-                eprintln!("Skipping bad row: {e}");
-            }
-        }
-    }
-    if !batch.is_empty() && tx.send(Msg::Batch(batch)).is_err() {
-        return Ok(());
-    }
-    Ok(())
-}
-
-fn worker_thread(rx: Receiver<Msg>) -> Shard {
-    let mut shard = Shard::new();
-    let mut processed = 0;
-    
-    while let Ok(Msg::Batch(rows)) = rx.recv() {
-        processed += rows.len();
-        for r in &rows {
-            shard.add(r);
-        }
-        
-        if processed >= 1_000_000 {
-            processed = 0;
-        }
-    }
-    
-    shard
 }
 
 /// Parse CSV data sequentially (for stdin or small files)
@@ -406,13 +411,13 @@ fn main() -> Result<()> {
             let rdr = open_reader(input_path, delim)?;
             parse_csv_sequential(rdr)?
         } else {
-            // Try parallel parsing for files
+            // Try optimized parsing first (memory-mapped, parallel)
             match parse_csv_parallel(path, delim) {
                 Ok(shard) => shard,
                 Err(e) => {
-                    eprintln!("Parallel parsing failed: {}", e);
+                    eprintln!("Optimized parsing failed: {}", e);
                     eprintln!("Falling back to sequential parsing...");
-                    let rdr = open_reader(input_path, delim)?;
+                     let rdr = open_reader(input_path, delim)?;
                     parse_csv_sequential(rdr)?
                 }
             }

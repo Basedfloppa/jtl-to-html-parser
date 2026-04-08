@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>/home/debian/Downloads/results_5.jtl</title>
+
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+    <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+    <style>
+        :root{
+    --bg:#0b1324;
+    --fg:#e9eef7;
+    --muted:#9aa8c7;
+    --card:#121c34;
+    --accent:#5aa9ff;
+
+    --good:#3ddc97;
+    --warn:#ffcc66;
+    --bad:#ff6b6b;
+}
+
+*{ box-sizing:border-box; }
+html,body{
+    margin:0; padding:0;
+    background:var(--bg);
+    color:var(--fg);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif;
+}
+
+.container{
+    margin:24px auto;
+    padding:0 16px;
+}
+
+h1,h2{ margin: 8px 0; }
+
+.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+.top{
+    display:flex;
+    align-items:flex-end;
+    justify-content:space-between;
+    gap:16px;
+    margin-bottom: 14px;
+}
+
+.topnav{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+}
+.topnav a{
+    color: var(--muted);
+    text-decoration:none;
+    padding:6px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.10);
+}
+.topnav a:hover{ color: var(--fg); border-color: rgba(255,255,255,.18); }
+.topnav a:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+
+.grid{
+    display:grid;
+    gap:16px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.card{
+    background:var(--card);
+    border-radius:14px;
+    padding:16px;
+    box-shadow:0 2px 8px rgba(0,0,0,.25);
+}
+
+.card-head{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    flex-wrap:wrap;
+}
+
+.metric{ font-size:32px; font-weight:700; letter-spacing:.2px; }
+.metric-row{ display:flex; align-items:baseline; gap:10px; }
+
+.kpi-label{ color:var(--muted); font-size:13px; letter-spacing:.2px; }
+.page-meta{ color:var(--muted); font-size:14px; }
+.sub{ color:var(--muted); font-size:14px; }
+.hint{ color:var(--muted); font-size:13px; margin-top:10px; }
+
+.unit{ color:var(--muted); font-size:13px; }
+
+.badge{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    padding:2px 10px;
+    border-radius:999px;
+    font-size:12px;
+    border: 1px solid rgba(255,255,255,.10);
+    background: rgba(90,169,255,.18);
+    color:#bfe0ff;
+    white-space:nowrap;
+}
+
+.badge.good{ background: rgba(61,220,151,.16); color:#bff5df; border-color: rgba(61,220,151,.25); }
+.badge.warn{ background: rgba(255,204,102,.16); color:#ffe3ad; border-color: rgba(255,204,102,.25); }
+.badge.bad { background: rgba(255,107,107,.16); color:#ffd0d0; border-color: rgba(255,107,107,.25); }
+
+.controls{ display:flex; gap:10px; align-items:center; }
+
+.select{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    color: var(--muted);
+    font-size: 13px;
+}
+select{
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.12);
+    color: var(--fg);
+    border-radius: 10px;
+    padding: 6px 10px;
+}
+select:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+
+.search input{
+    width: 240px;
+    max-width: 70vw;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.12);
+    color: var(--fg);
+    border-radius: 10px;
+    padding: 8px 10px;
+}
+.search input::placeholder{ color: rgba(233,238,247,.55); }
+.search input:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+
+.table-wrap{
+    overflow:auto;
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,.08);
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+    min-width: 980px;
+}
+
+thead th{
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--card);
+}
+
+th,td{
+    text-align:left;
+    padding:8px 10px;
+    border-bottom:1px solid rgba(255,255,255,.08);
+    vertical-align: top;
+}
+
+th{
+    color:var(--muted);
+    font-weight:600;
+    user-select:none;
+    cursor:pointer;
+}
+
+th:hover{ color: var(--fg); }
+
+td.num, th.num{
+    text-align:right;
+    font-variant-numeric: tabular-nums;
+}
+
+tbody tr:nth-child(2n){
+    background: rgba(255,255,255,.02);
+}
+tbody tr:hover{
+    background: rgba(255,255,255,.04);
+}
+
+#tbl-errors td:nth-child(2){
+    max-width: 520px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+
+canvas{
+    display:block;
+    width:100% !important;
+    height:100% !important;
+}
+
+.chart-bar{ height: 320px; }
+
+.chart-square{
+    width:100%;
+    max-width:640px;
+    margin:0 auto;
+    aspect-ratio: 1 / 1;
+}
+
+footer{
+    color:var(--muted);
+    margin:24px 0;
+    font-size:13px;
+}
+
+.sr-only{
+    position:absolute;
+    width:1px;
+    height:1px;
+    padding:0;
+    margin:-1px;
+    overflow:hidden;
+    clip:rect(0,0,0,0);
+    border:0;
+}
+
+@media (max-width: 640px){
+    .chart-bar{ height: 260px; }
+    .top{ align-items:flex-start; flex-direction:column; }
+}
+
+    </style>
+</head>
+
+<body>
+<div class="container">
+    <header class="top">
+        <div>
+            <h1>JMeter .JTL Report</h1>
+            <div class="page-meta">Generated by jtlstats — <span class="mono">/home/debian/Downloads/results_5.jtl</span></div>
+        </div>
+
+        <nav class="topnav" aria-label="Report sections">
+            <a href="#overview">Overview</a>
+            <a href="#charts">Charts</a>
+            <a href="#labels">Labels</a>
+            <a href="#errors">Errors</a>
+        </nav>
+    </header>
+
+    <section id="overview" class="grid">
+        <div class="card">
+            <div class="kpi-label">Total Samples</div>
+            <div id="m-samples" class="metric">—</div>
+        </div>
+
+        <div class="card">
+            <div class="kpi-label">Failures</div>
+            <div class="metric-row">
+                <div id="m-failures" class="metric">—</div>
+                <span class="badge" id="m-errorpct" aria-label="Error percentage">—</span>
+            </div>
+            <div class="hint" id="m-status">—</div>
+        </div>
+
+        <div class="card">
+            <div class="kpi-label">Throughput</div>
+            <div class="metric-row">
+                <div id="m-tps" class="metric">—</div>
+                <div class="unit">txn/sec</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="kpi-label">Bandwidth</div>
+            <div id="m-kbps" class="metric">—</div>
+            <div class="hint">kbps (recv / sent)</div>
+        </div>
+    </section>
+
+    <section id="charts" class="grid" style="margin-top:16px">
+        <div class="card">
+            <div class="card-head">
+                <h2>Requests by Label</h2>
+                <div class="controls">
+                    <label class="select">
+                        Top
+                        <select id="ctl-topn">
+                            <option value="10">10</option>
+                            <option value="25">25</option>
+                            <option value="0">All</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+            <div class="chart-bar">
+                <canvas id="chartCounts" aria-label="Requests by label bar chart" role="img">
+                    Requests by label chart.
+                </canvas>
+            </div>
+            <div id="charts-note" class="sub" style="margin-top:10px"></div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <h2>Latency p95 by Label</h2>
+                <div class="controls">
+                    <label class="select">
+                        Top
+                        <select id="ctl-topn2">
+                            <option value="10">10</option>
+                            <option value="25">25</option>
+                            <option value="0">All</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+            <div class="chart-bar">
+                <canvas id="chartP95" aria-label="p95 latency by label bar chart" role="img">
+                    p95 latency by label chart.
+                </canvas>
+            </div>
+        </div>
+    </section>
+
+    <section id="labels" class="card" style="margin-top:16px">
+        <div class="card-head">
+            <h2>Per-Label Details</h2>
+            <div class="controls">
+                <label class="search">
+                    <span class="sr-only">Filter labels</span>
+                    <input id="ctl-filter-labels" type="search" placeholder="Filter labels…" />
+                </label>
+            </div>
+        </div>
+
+        <div class="table-wrap" role="region" aria-label="Per-label details table" tabindex="0">
+            <table id="tbl-labels">
+                <caption class="sr-only">Per-label request statistics</caption>
+                <thead>
+                <tr>
+                    <th data-key="label">Label</th>
+                    <th class="num" data-key="count">Count</th>
+                    <th class="num" data-key="fails">Fails</th>
+                    <th class="num" data-key="error_pct">Error %</th>
+                    <th class="num" data-key="avg_ms">Avg ms</th>
+                    <th class="num" data-key="min_ms">Min</th>
+                    <th class="num" data-key="max_ms">Max</th>
+                    <th class="num" data-key="p50_ms">P50</th>
+                    <th class="num" data-key="p90_ms">P90</th>
+                    <th class="num" data-key="p95_ms">P95</th>
+                    <th class="num" data-key="p99_ms">P99</th>
+                    <th class="num" data-key="tps">TPS</th>
+                    <th class="num" data-key="kbps_recv">kbps recv</th>
+                    <th class="num" data-key="kbps_sent">kbps sent</th>
+                </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <div class="hint" id="labels-footnote">Tip: click a column header to sort.</div>
+    </section>
+
+    <section id="errors" class="card" style="margin-top:16px">
+        <div class="card">
+            <h2>Error Types (Top 10)</h2>
+            <div class="chart-square">
+                <canvas id="chartErrors" aria-label="Error types pie chart" role="img">
+                    Error types chart.
+                </canvas>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Error Details</h2>
+            <div id="error-summary" class="sub" style="margin-bottom:10px">—</div>
+
+            <div class="table-wrap" role="region" aria-label="Error details table" tabindex="0">
+                <table id="tbl-errors">
+                    <caption class="sr-only">Error details by response code and message</caption>
+                    <thead>
+                    <tr>
+                        <th data-key="response_code">Code</th>
+                        <th data-key="response_message">Message</th>
+                        <th class="num" data-key="count">Count</th>
+                        <th class="num" data-key="error_pct">% of errors</th>
+                        <th class="num" data-key="sample_pct">% of samples</th>
+                    </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+
+            <div class="hint">Tip: click a column header to sort.</div>
+        </div>
+    </section>
+</div>
+
+<script>
+    const OVERALL = {"samples":76377674,"failures":1184535,"error_pct":1.5508916912028508,"avg_ms":310.16556004310996,"min_ms":2,"max_ms":95918,"p50_ms":36,"p90_ms":360,"p95_ms":977,"p99_ms":4727,"duration_sec":4494.731,"tps":16992.713023315522,"kbps_recv":111664.7716733215,"kbps_sent":186373.98265302196};
+    const LABELS = [{"label":"HTTP put-order","count":38200421,"fails":1184426,"error_pct":3.1005574519715373,"avg_ms":470.49416117691516,"min_ms":2,"max_ms":95918,"p50_ms":85,"p90_ms":772,"p95_ms":3303,"p99_ms":5923,"tps":8498.933751541528,"kbps_recv":100588.3189040679,"kbps_sent":93622.17782198757},{"label":"HTTP proof-of-play","count":38177253,"fails":109,"error_pct":0.0002855103273145399,"avg_ms":149.73966293488957,"min_ms":2,"max_ms":74207,"p50_ms":21,"p90_ms":90,"p95_ms":238,"p99_ms":1284,"tps":8494.763929589404,"kbps_recv":11077.73682849711,"kbps_sent":92762.55726367926}];
+    const ERRORS = [{"response_code":"Non HTTP response code: java.net.SocketTimeoutException","response_message":"Non HTTP response message: Read timed out","count":1183619,"error_pct":99.9226700772877,"sample_pct":1.5496923878566924},{"response_code":"502","response_message":"Bad Gateway","count":763,"error_pct":0.06441346182257172,"sample_pct":0.0009989830274223853},{"response_code":"Non HTTP response code: java.net.SocketException","response_message":"Non HTTP response message: Connection reset","count":71,"error_pct":0.005993913223332362,"sample_pct":0.00009295910215857059},{"response_code":"Non HTTP response code: org.apache.http.conn.ConnectTimeoutException","response_message":"Non HTTP response message: Connect to rtb-test.imbalanced.tech:443 [rtb-test.imbalanced.tech/212.41.6.135] failed: Read timed out","count":35,"error_pct":0.0029547459551638403,"sample_pct":0.00004582490951478831},{"response_code":"Non HTTP response code: org.apache.http.conn.ConnectTimeoutException","response_message":"Non HTTP response message: Connect to rtb-test.imbalanced.tech:443 [rtb-test.imbalanced.tech/212.41.6.135] failed: connect timed out","count":17,"error_pct":0.0014351623210795796,"sample_pct":0.000022257813192897183},{"response_code":"Non HTTP response code: javax.net.ssl.SSLHandshakeException","response_message":"Non HTTP response message: Remote host terminated the handshake","count":10,"error_pct":0.0008442131300468116,"sample_pct":0.00001309283128993952},{"response_code":"Non HTTP response code: java.net.SocketException","response_message":"Non HTTP response message: Connection reset by peer","count":7,"error_pct":0.0005909491910327681,"sample_pct":9.164981902957663e-6},{"response_code":"Non HTTP response code: java.net.SocketException","response_message":"Non HTTP response message: Connection reset by peer (Write failed)","count":5,"error_pct":0.0004221065650234058,"sample_pct":6.54641564496976e-6},{"response_code":"Non HTTP response code: org.apache.http.conn.ConnectTimeoutException","response_message":"Non HTTP response message: Connect to rtb-test.imbalanced.tech:443 [rtb-test.imbalanced.tech/212.41.6.135] failed: Connect timed out","count":3,"error_pct":0.0002532639390140435,"sample_pct":3.927849386981855e-6},{"response_code":"Non HTTP response code: java.net.SocketException","response_message":"Non HTTP response message: Connection reset by peer (connect failed)","count":2,"error_pct":0.00016884262600936232,"sample_pct":2.6185662579879035e-6},{"response_code":"Non HTTP response code: org.apache.http.NoHttpResponseException","response_message":"Non HTTP response message: rtb-test.imbalanced.tech:443 failed to respond","count":2,"error_pct":0.00016884262600936232,"sample_pct":2.6185662579879035e-6},{"response_code":"Non HTTP response code: org.apache.http.conn.HttpHostConnectException","response_message":"Non HTTP response message: Connect to rtb-test.imbalanced.tech:443 [rtb-test.imbalanced.tech/212.41.6.135] failed: Connection refused","count":1,"error_pct":0.00008442131300468116,"sample_pct":1.3092831289939518e-6}];
+</script>
+
+<script>
+    document.addEventListener("DOMContentLoaded", () => {
+    const $ = (id) => document.getElementById(id);
+
+    // -------- formatting helpers --------
+    const nfInt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+    const nf2 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const nf3 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+
+    const fmtInt = (v) => nfInt.format(Number(v || 0));
+    const fmt2 = (v) => nf2.format(Number(v || 0));
+    const fmt3 = (v) => nf3.format(Number(v || 0));
+    const pct2 = (v) => `${fmt2(v)}%`;
+
+    const clip = (s, n = 80) => (s && s.length > n ? s.slice(0, n - 1) + "…" : (s ?? ""));
+
+    // -------- KPI population --------
+    const samples = OVERALL?.samples ?? 0;
+    const failures = OVERALL?.failures ?? 0;
+    const errPct = OVERALL?.error_pct ?? 0;
+    const tps = OVERALL?.tps ?? 0;
+    const kbpsRecv = OVERALL?.kbps_recv ?? 0;
+    const kbpsSent = OVERALL?.kbps_sent ?? 0;
+
+    if ($("m-samples")) $("m-samples").textContent = fmtInt(samples);
+    if ($("m-failures")) $("m-failures").textContent = fmtInt(failures);
+    if ($("m-tps")) $("m-tps").textContent = fmt3(tps);
+    if ($("m-kbps")) $("m-kbps").textContent = `${fmt2(kbpsRecv)} / ${fmt2(kbpsSent)}`;
+
+    const badge = $("m-errorpct");
+    if (badge) {
+        badge.textContent = pct2(errPct);
+        badge.classList.remove("good", "warn", "bad");
+        if (errPct < 1) badge.classList.add("good");
+        else if (errPct < 5) badge.classList.add("warn");
+        else badge.classList.add("bad");
+    }
+
+    const statusEl = $("m-status");
+    if (statusEl) {
+        const status =
+            errPct < 1 ? "Status: PASS (error < 1%)" :
+                errPct < 5 ? "Status: WARN (error 1–5%)" :
+                    "Status: FAIL (error ≥ 5%)";
+        statusEl.textContent = status;
+    }
+
+    // -------- table rendering --------
+    const labelsRaw = Array.isArray(LABELS) ? LABELS.slice() : [];
+    const errorsRaw = Array.isArray(ERRORS) ? ERRORS.slice() : [];
+
+    const tableState = {
+        labels: { key: "count", dir: "desc", filter: "" },
+        errors: { key: "count", dir: "desc" },
+    };
+
+    function makeTd(value, isNum = false) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        if (isNum) td.classList.add("num");
+        return td;
+    }
+
+    function sortBy(arr, key, dir) {
+        const m = dir === "asc" ? 1 : -1;
+        return arr.slice().sort((a, b) => {
+            const av = a?.[key];
+            const bv = b?.[key];
+            const aNum = typeof av === "number";
+            const bNum = typeof bv === "number";
+            if (aNum && bNum) return (av - bv) * m;
+            return String(av ?? "").localeCompare(String(bv ?? "")) * m;
+        });
+    }
+
+    function setSortIndicators(tableId, state) {
+        const thead = document.querySelector(`#${tableId} thead`);
+        if (!thead) return;
+        thead.querySelectorAll("th[data-key]").forEach((th) => {
+            const key = th.getAttribute("data-key");
+            const base = th.textContent.replace(/[\s▲▼]+$/g, "");
+            if (key === state.key) th.textContent = `${base} ${state.dir === "asc" ? "▲" : "▼"}`;
+            else th.textContent = base;
+        });
+    }
+
+    function renderLabelsTable() {
+        const tbody = document.querySelector("#tbl-labels tbody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+
+        const filter = (tableState.labels.filter || "").trim().toLowerCase();
+
+        let data = labelsRaw;
+        if (filter) data = data.filter((l) => String(l.label ?? "").toLowerCase().includes(filter));
+
+        data = sortBy(data, tableState.labels.key, tableState.labels.dir);
+
+        data.forEach((L) => {
+            const tr = document.createElement("tr");
+            tr.append(makeTd(String(L.label ?? "")));
+
+            tr.append(makeTd(fmtInt(L.count ?? 0), true));
+            tr.append(makeTd(fmtInt(L.fails ?? 0), true));
+            tr.append(makeTd(pct2(L.error_pct ?? 0), true));
+
+            tr.append(makeTd(fmt2(L.avg_ms ?? 0), true));
+            tr.append(makeTd(fmtInt(L.min_ms ?? 0), true));
+            tr.append(makeTd(fmtInt(L.max_ms ?? 0), true));
+            tr.append(makeTd(fmtInt(L.p50_ms ?? 0), true));
+            tr.append(makeTd(fmtInt(L.p90_ms ?? 0), true));
+            tr.append(makeTd(fmtInt(L.p95_ms ?? 0), true));
+            tr.append(makeTd(fmtInt(L.p99_ms ?? 0), true));
+
+            tr.append(makeTd(fmt3(L.tps ?? 0), true));
+            tr.append(makeTd(fmt3(L.kbps_recv ?? 0), true));
+            tr.append(makeTd(fmt3(L.kbps_sent ?? 0), true));
+
+            tbody.append(tr);
+        });
+
+        setSortIndicators("tbl-labels", tableState.labels);
+    }
+
+    function renderErrorsTable() {
+        const tbody = document.querySelector("#tbl-errors tbody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+
+        const data = sortBy(errorsRaw, tableState.errors.key, tableState.errors.dir);
+
+        data.forEach((E) => {
+            const tr = document.createElement("tr");
+            tr.append(makeTd(String(E.response_code ?? "")));
+            tr.append(makeTd(String(E.response_message ?? "")));
+
+            tr.append(makeTd(fmtInt(E.count ?? 0), true));
+            tr.append(makeTd(pct2(E.error_pct ?? 0), true));
+            tr.append(makeTd(pct2(E.sample_pct ?? 0), true));
+
+            tbody.append(tr);
+        });
+
+        setSortIndicators("tbl-errors", tableState.errors);
+    }
+
+    function attachSortHandlers(tableId, stateKey) {
+        const table = document.getElementById(tableId);
+        if (!table) return;
+
+        table.querySelectorAll("thead th[data-key]").forEach((th) => {
+            th.addEventListener("click", () => {
+                const key = th.getAttribute("data-key");
+                const state = tableState[stateKey];
+                if (state.key === key) state.dir = state.dir === "asc" ? "desc" : "asc";
+                else { state.key = key; state.dir = "desc"; }
+
+                if (stateKey === "labels") renderLabelsTable();
+                else renderErrorsTable();
+            });
+        });
+    }
+
+    attachSortHandlers("tbl-labels", "labels");
+    attachSortHandlers("tbl-errors", "errors");
+
+    const filterInput = $("ctl-filter-labels");
+    if (filterInput) {
+        filterInput.addEventListener("input", () => {
+            tableState.labels.filter = filterInput.value || "";
+            renderLabelsTable();
+        });
+    }
+
+    renderLabelsTable();
+    renderErrorsTable();
+
+    const totalErrors = errorsRaw.reduce((a, e) => a + (e.count || 0), 0);
+    const summary = `Total errors: ${fmtInt(totalErrors)}  •  Error rate: ${pct2(errPct)}  •  Samples: ${fmtInt(samples)}`;
+    if ($("error-summary")) $("error-summary").textContent = summary;
+
+    // -------- charts --------
+    let chartCounts = null;
+    let chartP95 = null;
+    let chartErrors = null;
+
+    const note = $("charts-note");
+
+    function withChartJs(cb, tries = 0) {
+        if (window.Chart) return cb();
+        if (tries > 120) {
+            if (note) {
+                note.textContent =
+                    "Charts unavailable (Chart.js failed to load). If you opened this file offline, internet access is required unless Chart.js is bundled.";
+            }
+            return;
+        }
+        setTimeout(() => withChartJs(cb, tries + 1), 50);
+    }
+
+    function getTopN(arr, n) {
+        if (!n || n <= 0) return arr;
+        return arr.slice(0, n);
+    }
+
+    function buildCountsData(topN) {
+        const data = sortBy(labelsRaw, "count", "desc");
+        const top = getTopN(data, topN);
+
+        return {
+            labels: top.map((x) => clip(String(x.label ?? ""), 60)),
+            countData: top.map((x) => x.count ?? 0),
+            failData: top.map((x) => x.fails ?? 0),
+        };
+    }
+
+    function buildP95Data(topN) {
+        const data = sortBy(labelsRaw, "p95_ms", "desc");
+        const top = getTopN(data, topN);
+
+        return {
+            labels: top.map((x) => clip(String(x.label ?? ""), 60)),
+            p95Data: top.map((x) => x.p95_ms ?? 0),
+        };
+    }
+
+    function destroyCharts() {
+        [chartCounts, chartP95, chartErrors].forEach((c) => c && c.destroy());
+        chartCounts = chartP95 = chartErrors = null;
+    }
+
+    function renderCharts() {
+        const elCounts = $("chartCounts");
+        const elP95 = $("chartP95");
+        const elErrors = $("chartErrors");
+        if (!elCounts && !elP95 && !elErrors) return;
+
+        // read controls
+        const topn1 = Number($("ctl-topn")?.value ?? 10);
+        const topn2 = Number($("ctl-topn2")?.value ?? 10);
+
+        const counts = buildCountsData(topn1);
+        const p95 = buildP95Data(topn2);
+
+        const errTop = getTopN(sortBy(errorsRaw, "count", "desc"), 10);
+        const errNames = errTop.map((e) => `${clip(e.response_code, 24)} ${clip(e.response_message, 80)}`.trim());
+        const errCounts = errTop.map((e) => e.count ?? 0);
+
+        destroyCharts();
+
+        const common = {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: "#cfe3ff" } } },
+            scales: {
+                x: { ticks: { color: "#cfe3ff" }, grid: { color: "rgba(255,255,255,.08)" } },
+                y: { ticks: { color: "#cfe3ff" }, grid: { color: "rgba(255,255,255,.08)" } },
+            },
+        };
+
+        if (elCounts) {
+            chartCounts = new Chart(elCounts, {
+                type: "bar",
+                data: {
+                    labels: counts.labels,
+                    datasets: [
+                        { label: "Count", data: counts.countData },
+                        { label: "Failures", data: counts.failData },
+                    ],
+                },
+                options: { ...common, indexAxis: "y" },
+            });
+        }
+
+        if (elP95) {
+            chartP95 = new Chart(elP95, {
+                type: "bar",
+                data: { labels: p95.labels, datasets: [{ label: "p95 (ms)", data: p95.p95Data }] },
+                options: { ...common, indexAxis: "y" },
+            });
+        }
+
+        if (elErrors) {
+            chartErrors = new Chart(elErrors, {
+                type: "pie",
+                data: { labels: errNames, datasets: [{ label: "Errors (top 10)", data: errCounts }] },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: "right", labels: { color: "#cfe3ff" } },
+                    },
+                },
+            });
+        }
+
+        if (note) note.textContent = "";
+    }
+
+    const topnCtl = $("ctl-topn");
+    const topnCtl2 = $("ctl-topn2");
+    if (topnCtl) topnCtl.addEventListener("change", () => withChartJs(renderCharts));
+    if (topnCtl2) topnCtl2.addEventListener("change", () => withChartJs(renderCharts));
+
+    withChartJs(renderCharts);
+});
+
+</script>
+</body>
+</html>
