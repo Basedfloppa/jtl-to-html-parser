@@ -189,11 +189,11 @@ impl Shard {
         if !r.success {
             *self
                 .error_types
-                .entry((r.response_code.clone(), r.response_message.clone()))
+                .entry((r.response_code.to_string(), r.response_message.to_string()))
                 .or_default() += 1;
         }
         self.overall.add(r);
-        self.per_label.entry(r.label.clone()).or_default().add(r);
+        self.per_label.entry(r.label.to_string()).or_default().add(r);
     }
 
     fn merge(&mut self, other: Shard) {
@@ -277,12 +277,12 @@ fn parse_csv_memory_mapped(path: &str, delim: u8) -> Result<Shard> {
 
     let file = File::open(path).with_context(|| format!("open {}", path))?;
     let mmap = unsafe { Mmap::map(&file)? };
-    let data = mmap.as_ref();
     
     let threads = num_cpus::get();
     eprintln!("Using {} threads for parallel processing", threads);
 
     // Find header
+    let data = mmap.as_ref();
     let header_end = data.find_byte(b'\n').unwrap_or(0) + 1;
     let header = &data[..header_end];
     let body = &data[header_end..];
@@ -337,18 +337,29 @@ fn parse_csv_memory_mapped(path: &str, delim: u8) -> Result<Shard> {
         let end = chunk_ends[i];
         let chunk = &body[start..end];
         
-        // Create chunk with header for CSV parsing
-        let mut chunk_with_header = Vec::with_capacity(header.len() + chunk.len());
-        chunk_with_header.extend_from_slice(header);
-        chunk_with_header.extend_from_slice(chunk);
+        // Create a slice that includes header + chunk for CSV parsing
+        // We need to create a new vector since CSV reader needs contiguous memory
+        let header_len = header.len();
+        let chunk_len = chunk.len();
+        let total_len = header_len + chunk_len;
+        
+        // Clone header data for thread
+        let header_vec = header.to_vec();
+        let chunk_vec = chunk.to_vec();
         
         let handle = thread::spawn(move || {
             let mut shard = Shard::new();
+            
+            // Create buffer for CSV parsing
+            let mut buffer = Vec::with_capacity(total_len);
+            buffer.extend_from_slice(&header_vec);
+            buffer.extend_from_slice(&chunk_vec);
+            
             let mut rdr = csv::ReaderBuilder::new()
                 .delimiter(delim)
                 .has_headers(true)
                 .flexible(true)
-                .from_reader(chunk_with_header.as_slice());
+                .from_reader(buffer.as_slice());
             
             for rec in rdr.deserialize::<Row>() {
                 match rec {
@@ -364,8 +375,6 @@ fn parse_csv_memory_mapped(path: &str, delim: u8) -> Result<Shard> {
             shard
         });
 
-        eprintln!("Processed {} rows, chunk {}/{}", chunk_size * (i + 1), i + 1, chunk_starts.len());
-        
         handles.push(handle);
     }
     
@@ -490,15 +499,19 @@ fn parse_csv_streaming(path: &str, delim: u8) -> Result<Shard> {
                         }
                         
                         // Create CSV reader for this chunk (need to include header)
-                        let mut chunk_with_header = Vec::with_capacity(header_buf_clone.len() + (chunk_end - chunk_start));
-                        chunk_with_header.extend_from_slice(&header_buf_clone);
-                        chunk_with_header.extend_from_slice(&chunk[chunk_start..chunk_end]);
+                        let header_len = header_buf_clone.len();
+                        let data_len = chunk_end - chunk_start;
+                        let total_len = header_len + data_len;
+                        
+                        let mut buffer = Vec::with_capacity(total_len);
+                        buffer.extend_from_slice(&header_buf_clone);
+                        buffer.extend_from_slice(&chunk[chunk_start..chunk_end]);
                         
                         let mut rdr = csv::ReaderBuilder::new()
                             .delimiter(delim)
                             .has_headers(true)
                             .flexible(true)
-                            .from_reader(chunk_with_header.as_slice());
+                            .from_reader(buffer.as_slice());
                         
                         let mut chunk_lines = 0;
                         // Parse rows

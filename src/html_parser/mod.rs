@@ -20,13 +20,10 @@ fn json_for_script<T: serde::Serialize>(v: &T) -> String {
 
 pub fn render_html(
     overall: OverallOut,
-    mut labels: Vec<LabelOut>,
-    mut errs: Vec<ErrTypeOut>,
+    labels: Vec<LabelOut>,
+    errs: Vec<ErrTypeOut>,
     title: &str,
 ) -> String {
-    labels.sort_by(|a, b| b.count.cmp(&a.count));
-    errs.sort_by(|a, b| b.count.cmp(&a.count));
-
     let title_escaped = escape_html(title);
     let overall_json = json_for_script(&overall);
     let labels_json = json_for_script(&labels);
