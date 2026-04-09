@@ -5,10 +5,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const nfInt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
     const nf2 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const nf3 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+    const nf0 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 
     const fmtInt = (v) => nfInt.format(Number(v || 0));
     const fmt2 = (v) => nf2.format(Number(v || 0));
     const fmt3 = (v) => nf3.format(Number(v || 0));
+    const fmt0 = (v) => nf0.format(Math.round(Number(v || 0)));
     const pct2 = (v) => `${fmt2(v)}%`;
 
     const clip = (s, n = 80) => (s && s.length > n ? s.slice(0, n - 1) + "…" : (s ?? ""));
@@ -20,11 +22,47 @@ document.addEventListener("DOMContentLoaded", () => {
     const tps = OVERALL?.tps ?? 0;
     const kbpsRecv = OVERALL?.kbps_recv ?? 0;
     const kbpsSent = OVERALL?.kbps_sent ?? 0;
+    const durationSec = OVERALL?.duration_sec ?? 0;
+    const durationHours = OVERALL?.duration_hours ?? 0;
+    const durationMinutes = OVERALL?.duration_minutes ?? 0;
+    const startDate = OVERALL?.start_date ?? "N/A";
+    const startTimestamp = OVERALL?.start_timestamp ?? 0;
 
     if ($("m-samples")) $("m-samples").textContent = fmtInt(samples);
     if ($("m-failures")) $("m-failures").textContent = fmtInt(failures);
     if ($("m-tps")) $("m-tps").textContent = fmt3(tps);
     if ($("m-kbps")) $("m-kbps").textContent = `${fmt2(kbpsRecv)} / ${fmt2(kbpsSent)}`;
+
+    // Format duration with rounded values
+    if ($("m-duration")) {
+        if (durationHours >= 1) {
+            // Round hours to nearest whole number
+            $("m-duration").textContent = `${fmt0(durationHours)} hours`;
+        } else if (durationMinutes >= 1) {
+            // Round minutes to nearest whole number
+            $("m-duration").textContent = `${fmt0(durationMinutes)} minutes`;
+        } else {
+            // Round seconds to nearest whole number
+            $("m-duration").textContent = `${fmt0(durationSec)} seconds`;
+        }
+    }
+    
+    if ($("m-duration-details")) {
+        $("m-duration-details").textContent = `${fmt0(durationSec)}s total`;
+    }
+
+    // Format start date
+    if ($("m-start-date")) {
+        $("m-start-date").textContent = startDate;
+    }
+    
+    if ($("m-start-timestamp")) {
+        if (startTimestamp > 0) {
+            $("m-start-timestamp").textContent = `Timestamp: ${startTimestamp}`;
+        } else {
+            $("m-start-timestamp").textContent = "No timestamp available";
+        }
+    }
 
     const badge = $("m-errorpct");
     if (badge) {
@@ -107,6 +145,8 @@ document.addEventListener("DOMContentLoaded", () => {
             tr.append(makeTd(fmtInt(L.min_ms ?? 0), true));
             tr.append(makeTd(fmtInt(L.max_ms ?? 0), true));
             tr.append(makeTd(fmtInt(L.p50_ms ?? 0), true));
+            tr.append(makeTd(fmtInt(L.p75_ms ?? 0), true));
+            tr.append(makeTd(fmtInt(L.p85_ms ?? 0), true));
             tr.append(makeTd(fmtInt(L.p90_ms ?? 0), true));
             tr.append(makeTd(fmtInt(L.p95_ms ?? 0), true));
             tr.append(makeTd(fmtInt(L.p99_ms ?? 0), true));
@@ -180,7 +220,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // -------- charts --------
     let chartCounts = null;
-    let chartP95 = null;
+    let chartPercentiles = null;
     let chartErrors = null;
 
     const note = $("charts-note");
@@ -213,33 +253,47 @@ document.addEventListener("DOMContentLoaded", () => {
         };
     }
 
-    function buildP95Data(topN) {
-        const data = sortBy(labelsRaw, "p95_ms", "desc");
+    function buildPercentileData(topN) {
+        const data = sortBy(labelsRaw, "count", "desc");
         const top = getTopN(data, topN);
 
+        // Define percentile keys and their display names
+        const percentiles = [
+            { key: "p50_ms", label: "P50" },
+            { key: "p75_ms", label: "P75" },
+            { key: "p85_ms", label: "P85" },
+            { key: "p90_ms", label: "P90" },
+            { key: "p95_ms", label: "P95" },
+            { key: "p99_ms", label: "P99" },
+        ];
+
         return {
-            labels: top.map((x) => clip(String(x.label ?? ""), 60)),
-            p95Data: top.map((x) => x.p95_ms ?? 0),
+            labels: top.map((x) => clip(String(x.label ?? ""), 40)),
+            datasets: percentiles.map((p) => ({
+                label: p.label,
+                data: top.map((x) => x[p.key] ?? 0),
+            })),
         };
     }
 
     function destroyCharts() {
-        [chartCounts, chartP95, chartErrors].forEach((c) => c && c.destroy());
-        chartCounts = chartP95 = chartErrors = null;
+        [chartCounts, chartPercentiles, chartErrors].forEach((c) => c && c.destroy());
+        chartCounts = chartPercentiles = chartErrors = null;
     }
 
     function renderCharts() {
         const elCounts = $("chartCounts");
-        const elP95 = $("chartP95");
+        const elPercentiles = $("chartPercentiles");
         const elErrors = $("chartErrors");
-        if (!elCounts && !elP95 && !elErrors) return;
+        if (!elCounts && !elP95 && !elPercentiles && !elErrors) return;
 
         // read controls
         const topn1 = Number($("ctl-topn")?.value ?? 10);
         const topn2 = Number($("ctl-topn2")?.value ?? 10);
+        const topn3 = Number($("ctl-topn3")?.value ?? 5);
 
         const counts = buildCountsData(topn1);
-        const p95 = buildP95Data(topn2);
+        const percentiles = buildPercentileData(topn3);
 
         const errTop = getTopN(sortBy(errorsRaw, "count", "desc"), 10);
         const errNames = errTop.map((e) => `${clip(e.response_code, 24)} ${clip(e.response_message, 80)}`.trim());
@@ -271,11 +325,34 @@ document.addEventListener("DOMContentLoaded", () => {
             });
         }
 
-        if (elP95) {
-            chartP95 = new Chart(elP95, {
+        if (elPercentiles) {
+            chartPercentiles = new Chart(elPercentiles, {
                 type: "bar",
-                data: { labels: p95.labels, datasets: [{ label: "p95 (ms)", data: p95.p95Data }] },
-                options: { ...common, indexAxis: "y" },
+                data: {
+                    labels: percentiles.labels,
+                    datasets: percentiles.datasets,
+                },
+                options: {
+                    ...common,
+                    indexAxis: "x",
+                    scales: {
+                        x: {
+                            stacked: false,
+                            ticks: { color: "#cfe3ff" },
+                            grid: { color: "rgba(255,255,255,.08)" }
+                        },
+                        y: {
+                            stacked: false,
+                            ticks: { color: "#cfe3ff" },
+                            grid: { color: "rgba(255,255,255,.08)" },
+                            title: {
+                                display: true,
+                                text: "Latency (ms)",
+                                color: "#cfe3ff"
+                            }
+                        }
+                    }
+                },
             });
         }
 
@@ -298,8 +375,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const topnCtl = $("ctl-topn");
     const topnCtl2 = $("ctl-topn2");
+    const topnCtl3 = $("ctl-topn3");
     if (topnCtl) topnCtl.addEventListener("change", () => withChartJs(renderCharts));
     if (topnCtl2) topnCtl2.addEventListener("change", () => withChartJs(renderCharts));
+    if (topnCtl3) topnCtl3.addEventListener("change", () => withChartJs(renderCharts));
 
     withChartJs(renderCharts);
 });

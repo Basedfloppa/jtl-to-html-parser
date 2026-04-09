@@ -3,6 +3,7 @@ mod html_parser;
 use ahash::AHashMap;
 use anyhow::{Context, Result};
 use bstr::ByteSlice;
+use chrono;
 use hdrhistogram::Histogram;
 use memmap2::Mmap;
 use num_cpus;
@@ -56,10 +57,16 @@ struct OverallOut {
     min_ms: u64,
     max_ms: u64,
     p50_ms: u64,
+    p75_ms: u64,
+    p85_ms: u64,
     p90_ms: u64,
     p95_ms: u64,
     p99_ms: u64,
     duration_sec: f64,
+    duration_hours: f64,
+    duration_minutes: f64,
+    start_timestamp: i64,
+    start_date: String,
     tps: f64,
     kbps_recv: f64,
     kbps_sent: f64,
@@ -75,6 +82,8 @@ struct LabelOut {
     min_ms: u64,
     max_ms: u64,
     p50_ms: u64,
+    p75_ms: u64,
+    p85_ms: u64,
     p90_ms: u64,
     p95_ms: u64,
     p99_ms: u64,
@@ -644,6 +653,21 @@ fn main() -> Result<()> {
     } else {
         0.0
     };
+    // Calculate duration in hours and minutes
+    let duration_hours = dur / 3600.0;
+    let duration_minutes = dur / 60.0;
+    
+    // Format start date from timestamp
+    let start_timestamp = if overall.first_ts == i64::MAX { 0 } else { overall.first_ts };
+    let start_date = if start_timestamp > 0 {
+        let seconds = start_timestamp / 1000;
+        let nanos = ((start_timestamp % 1000) * 1_000_000) as u32;
+        let dt = chrono::DateTime::from_timestamp(seconds, nanos).unwrap_or_default();
+        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    } else {
+        "N/A".to_string()
+    };
+    
     let overall_out = OverallOut {
         samples: overall.count,
         failures: overall.fails,
@@ -660,10 +684,16 @@ fn main() -> Result<()> {
         },
         max_ms: overall.max_elapsed,
         p50_ms: overall.q(0.50),
+        p75_ms: overall.q(0.75),
+        p85_ms: overall.q(0.85),
         p90_ms: overall.q(0.90),
         p95_ms: overall.q(0.95),
         p99_ms: overall.q(0.99),
         duration_sec: dur,
+        duration_hours,
+        duration_minutes,
+        start_timestamp,
+        start_date,
         tps,
         kbps_recv: kbps(overall.recv_bytes, dur),
         kbps_sent: kbps(overall.sent_bytes, dur),
@@ -684,6 +714,8 @@ fn main() -> Result<()> {
                 min_ms: if agg.min_elapsed == u64::MAX { 0 } else { agg.min_elapsed },
                 max_ms: agg.max_elapsed,
                 p50_ms: agg.q(0.50),
+                p75_ms: agg.q(0.75),
+                p85_ms: agg.q(0.85),
                 p90_ms: agg.q(0.90),
                 p95_ms: agg.q(0.95),
                 p99_ms: agg.q(0.99),

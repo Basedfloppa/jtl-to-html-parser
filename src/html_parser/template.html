@@ -57,6 +57,18 @@
             <div id="m-kbps" class="metric">—</div>
             <div class="hint">kbps (recv / sent)</div>
         </div>
+
+        <div class="card">
+            <div class="kpi-label">Test Duration</div>
+            <div id="m-duration" class="metric">—</div>
+            <div class="hint" id="m-duration-details">—</div>
+        </div>
+
+        <div class="card">
+            <div class="kpi-label">Test Start</div>
+            <div id="m-start-date" class="metric">—</div>
+            <div class="hint" id="m-start-timestamp">—</div>
+        </div>
     </section>
 
     <section id="charts" class="grid" style="margin-top:16px">
@@ -84,23 +96,24 @@
 
         <div class="card">
             <div class="card-head">
-                <h2>Latency p95 by Label</h2>
+                <h2>Percentile Distribution</h2>
                 <div class="controls">
                     <label class="select">
                         Top
-                        <select id="ctl-topn2">
+                        <select id="ctl-topn3">
+                            <option value="5">5</option>
                             <option value="10">10</option>
-                            <option value="25">25</option>
                             <option value="0">All</option>
                         </select>
                     </label>
                 </div>
             </div>
             <div class="chart-bar">
-                <canvas id="chartP95" aria-label="p95 latency by label bar chart" role="img">
-                    p95 latency by label chart.
+                <canvas id="chartPercentiles" aria-label="Percentile distribution chart" role="img">
+                    Percentile distribution chart.
                 </canvas>
             </div>
+            <div class="hint">Shows p50, p75, p85, p90, p95, p99 percentiles for top labels</div>
         </div>
     </section>
 
@@ -128,6 +141,8 @@
                     <th class="num" data-key="min_ms">Min</th>
                     <th class="num" data-key="max_ms">Max</th>
                     <th class="num" data-key="p50_ms">P50</th>
+                    <th class="num" data-key="p75_ms">P75</th>
+                    <th class="num" data-key="p85_ms">P85</th>
                     <th class="num" data-key="p90_ms">P90</th>
                     <th class="num" data-key="p95_ms">P95</th>
                     <th class="num" data-key="p99_ms">P99</th>
