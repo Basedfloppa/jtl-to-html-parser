@@ -357,6 +357,7 @@ fn parse_csv_memory_mapped(path: &str, delim: u8) -> Result<Shard> {
     let mut handles = Vec::with_capacity(chunk_starts.len());
     
     for i in 0..chunk_starts.len() {
+        let starts = chunk_starts.clone();
         let start = chunk_starts[i];
         let end = chunk_ends[i];
         let chunk = &body[start..end];
@@ -395,13 +396,15 @@ fn parse_csv_memory_mapped(path: &str, delim: u8) -> Result<Shard> {
                     }
                 }
             }
-            
+
+            eprintln!("Processed {}/{} shards, {} rows", i + 1, starts.len() + 1, chunk_size * (i+1));
+
             shard
         });
 
         handles.push(handle);
     }
-    
+
     // Merge all shards
     eprintln!("Merging results from {} shards...", handles.len());
     let mut total = Shard::new();
